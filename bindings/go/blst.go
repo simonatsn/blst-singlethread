@@ -219,8 +219,7 @@ func (dummy *P2Affine) VerifyCompressed(sig []byte, pk []byte,
 
 // Aggregate verify with uncompressed signature and public keys
 func (sig *P2Affine) AggregateVerify(pks []*P1Affine, msgs []Message,
-	dst []byte,
-	optional ...interface{}) bool { // useHash bool, augs [][]byte
+	dst []byte, optional ...interface{}) bool { // useHash bool, augs [][]byte
 
 	// sanity checks and argument parsing
 	if len(pks) != len(msgs) {
@@ -250,8 +249,7 @@ func (sig *P2Affine) AggregateVerify(pks []*P1Affine, msgs []Message,
 // Aggregate verify with compressed signature and public keys
 // Uses a dummy signature to get the correct type
 func (dummy *P2Affine) AggregateVerifyCompressed(sig []byte, pks [][]byte,
-	msgs []Message, dst []byte,
-	optional ...bool) bool { // useHash bool, usePksAsAugs bool
+	msgs []Message, dst []byte, optional ...bool) bool { // useHash bool, usePksAsAugs bool
 
 	// sanity checks and argument parsing
 	if len(pks) != len(msgs) {
@@ -305,8 +303,7 @@ func (dummy *P2Affine) AggregateVerifyCompressed(sig []byte, pks [][]byte,
 
 // TODO: check message uniqueness
 func coreAggregateVerifyPkInG1(sigFn sigGetterP2, pkFn pkGetterP1,
-	msgs []Message, dst []byte,
-	optional ...bool) bool { // useHash
+	msgs []Message, dst []byte, optional ...bool) bool { // useHash
 
 	n := len(msgs)
 	if n == 0 {
@@ -317,75 +314,30 @@ func coreAggregateVerifyPkInG1(sigFn sigGetterP2, pkFn pkGetterP1,
 	if len(optional) > 0 {
 		useHash = optional[0]
 	}
-
-	numThreads := runtime.GOMAXPROCS(0)
-	if numThreads > n {
-		numThreads = n
-	}
-	// Each thread will determine next message to process by atomically
-	// incrementing curItem, process corresponding pk,msg[,aug] tuple and
-	// repeat until n is exceeded.  The resulting accumulations will be
-	// fed into the msgsCh channel.
-	msgsCh := make(chan Pairing, numThreads)
-	valid := int32(1)
-	curItem := uint32(0)
-	for tid := 0; tid < numThreads; tid++ {
-		go func() {
-			pairing := PairingCtx()
-			var temp P1Affine
-			for atomic.LoadInt32(&valid) > 0 {
-				// Get a work item
-				work := atomic.AddUint32(&curItem, 1) - 1
-				if work >= uint32(n) {
-					break
-				}
-
-				// pull Public Key and augmentation blob
-				curPk, aug := pkFn(work, &temp)
-				if curPk == nil {
-					atomic.StoreInt32(&valid, 0)
-					break
-				}
-
-				// Pairing and accumulate
-				// TODO: delay subgroup check until miller loop by default
-				PairingAggregatePkInG1(pairing, curPk, nil,
-					useHash, msgs[work], dst, aug)
-
-				// application might have some async work to do
-				runtime.Gosched()
-			}
-			if atomic.LoadInt32(&valid) > 0 {
-				PairingCommit(pairing)
-				msgsCh <- pairing
-			} else {
-				msgsCh <- nil
-			}
-		}()
+	var pairings Pairing
+	for i := uint32(0); i < uint32(n); i++ {
+		pairing := PairingCtx()
+		var temp P1Affine
+		curPk, aug := pkFn(i, &temp)
+		PairingAggregatePkInG1(pairing, curPk, nil,
+			useHash, msgs[i], dst, aug)
+		PairingCommit(pairing)
+		if pairings == nil {
+			pairings = pairing
+		} else {
+			PairingMerge(pairings, pairing)
+		}
 	}
 
 	// Uncompress and check signature
 	var gtsig Fp12
 	sig := sigFn()
-	if sig == nil {
-		atomic.StoreInt32(&valid, 0)
-	} else {
+
+	if sig != nil {
 		C.blst_aggregated_in_g2(&gtsig, sig)
 	}
 
-	// Accumulate the thread results
-	var pairings Pairing
-	for i := 0; i < numThreads; i++ {
-		msg := <-msgsCh
-		if msg != nil {
-			if pairings == nil {
-				pairings = msg
-			} else {
-				PairingMerge(pairings, msg)
-			}
-		}
-	}
-	if atomic.LoadInt32(&valid) == 0 || pairings == nil {
+	if pairings == nil || sig == nil {
 		return false
 	}
 
