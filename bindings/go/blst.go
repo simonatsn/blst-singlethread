@@ -314,20 +314,14 @@ func coreAggregateVerifyPkInG1(sigFn sigGetterP2, pkFn pkGetterP1,
 	if len(optional) > 0 {
 		useHash = optional[0]
 	}
-	var pairings Pairing
+    var temp P1Affine
+    pairing := PairingCtx()
 	for i := uint32(0); i < uint32(n); i++ {
-		pairing := PairingCtx()
-		var temp P1Affine
 		curPk, aug := pkFn(i, &temp)
 		PairingAggregatePkInG1(pairing, curPk, nil,
 			useHash, msgs[i], dst, aug)
-		PairingCommit(pairing)
-		if pairings == nil {
-			pairings = pairing
-		} else {
-			PairingMerge(pairings, pairing)
-		}
 	}
+    PairingCommit(pairing)
 
 	// Uncompress and check signature
 	var gtsig Fp12
@@ -337,11 +331,11 @@ func coreAggregateVerifyPkInG1(sigFn sigGetterP2, pkFn pkGetterP1,
 		C.blst_aggregated_in_g2(&gtsig, sig)
 	}
 
-	if pairings == nil || sig == nil {
+	if pairing == nil || sig == nil {
 		return false
 	}
 
-	return PairingFinalVerify(pairings, &gtsig)
+	return PairingFinalVerify(pairing, &gtsig)
 }
 
 func (sig *P2Affine) FastAggregateVerify(pks []*P1Affine, msg Message,
